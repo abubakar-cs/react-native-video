@@ -31,11 +31,13 @@ class PictureInPictureReceiver(private val view: ReactExoplayerView, private val
 
     override fun onReceive(context: Context?, intent: Intent?) {
         intent ?: return
-        if (intent.action == ACTION_MEDIA_CONTROL) {
-            when (intent.getIntExtra(EXTRA_CONTROL_TYPE, 0)) {
-                CONTROL_TYPE_PLAY -> view.setPausedModifier(false)
-                CONTROL_TYPE_PAUSE -> view.setPausedModifier(true)
-            }
+        if (intent.action != ACTION_MEDIA_CONTROL) return
+        // Only the player that owns PIP should respond to play/pause.
+        // Multiple receivers are registered (one per video in list); all receive the broadcast.
+        if (ReactExoplayerView.getPipOwner() != view) return
+        when (intent.getIntExtra(EXTRA_CONTROL_TYPE, 0)) {
+            CONTROL_TYPE_PLAY -> view.setPausedModifier(false)
+            CONTROL_TYPE_PAUSE -> view.setPausedModifier(true)
         }
     }
 

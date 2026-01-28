@@ -24,6 +24,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.graphics.Rect;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewGroup;
@@ -145,6 +146,7 @@ import java.net.CookieHandler;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -226,6 +228,23 @@ public class ReactExoplayerView extends FrameLayout implements
     private boolean disableCache = false;
     private ControlsConfig controlsConfig = new ControlsConfig();
     private ArrayList<Integer> rootViewChildrenOriginalVisibility = new ArrayList<Integer>();
+    private final Map<View, Integer> rootViewChildrenVisibility = new HashMap<>();
+    private static ReactExoplayerView pipOwner;
+
+    /**
+     * The view that explicitly requested PIP (enterPictureInPictureMode).
+     * The activity PIP callback fires for all views; only this one should move to rootView.
+     */
+    private static ReactExoplayerView pendingPipEnterView;
+
+    /** Returns the player instance that currently owns PIP mode. Used by PictureInPictureReceiver to route play/pause. */
+    public static ReactExoplayerView getPipOwner() {
+        return pipOwner;
+    }
+
+    private ViewGroup originalParent;
+    private int originalIndex;
+
 
     /*
      * When user is seeking first called is on onPositionDiscontinuity -> DISCONTINUITY_REASON_SEEK
@@ -401,6 +420,12 @@ public class ReactExoplayerView extends FrameLayout implements
         themedReactContext.removeLifecycleEventListener(this);
         releasePlayer();
         viewHasDropped = true;
+        if (pipOwner == this) {
+            pipOwner = null;
+        }
+        if (pendingPipEnterView == this) {
+            pendingPipEnterView = null;
+        }
     }
 
     //BandwidthMeter.EventListener implementation
@@ -429,8 +454,6 @@ public class ReactExoplayerView extends FrameLayout implements
         if (player == null) return;
         if (exoPlayerView.isControllerVisible()) {
             exoPlayerView.hideController();
-        } else {
-            exoPlayerView.showController();
         }
     }
 
@@ -628,6 +651,7 @@ public class ReactExoplayerView extends FrameLayout implements
 
     private void initializePlayer() {
         disableCache = ReactNativeVideoManager.Companion.getInstance().shouldDisableCache(source);
+
         ReactExoplayerView self = this;
         Activity activity = themedReactContext.getCurrentActivity();
         // This ensures all props have been settled, to avoid async racing conditions.
@@ -847,7 +871,7 @@ public class ReactExoplayerView extends FrameLayout implements
             initializeDaiSource(runningSource);
             return;
         }
-        
+
         if (runningSource.getUri() == null) {
             return;
         }
@@ -1447,7 +1471,7 @@ public class ReactExoplayerView extends FrameLayout implements
                     }
                     // Setting the visibility for the player controls
                     if (exoPlayerView != null) {
-                        exoPlayerView.showController();
+                        // Do not force show; visibility is handled by setUseController/controls prop
                     }
                     setKeepScreenOn(preventsDisplaySleepDuringVideoPlayback);
                     break;
@@ -1942,7 +1966,9 @@ public class ReactExoplayerView extends FrameLayout implements
         if (isPlaying && isSeeking) {
             eventEmitter.onVideoSeek.invoke(player.getCurrentPosition(), seekPosition);
         }
-        PictureInPictureUtil.applyPlayingStatus(themedReactContext, pictureInPictureParamsBuilder, pictureInPictureReceiver, !isPlaying);
+        if (pipOwner == this) {
+            PictureInPictureUtil.applyPlayingStatus(themedReactContext, pictureInPictureParamsBuilder, pictureInPictureReceiver, !isPlaying);
+        }
         eventEmitter.onVideoPlaybackStateChanged.invoke(isPlaying, isSeeking);
 
         if (isPlaying) {
@@ -2470,6 +2496,47 @@ public class ReactExoplayerView extends FrameLayout implements
     }
 
     protected void setIsInPictureInPicture(boolean isInPictureInPicture) {
+        if (isInPictureInPicture) {
+            // Only the view that triggered enterPictureInPictureMode() should move to rootView.
+            // The activity PIP callback fires for all views; ignore if we're not the trigger.
+            if (pendingPipEnterView != this) {
+                return;
+            }
+            pendingPipEnterView = null;
+        }
+
+        // Check if there's a stale pipOwner that's no longer valid
+        if (pipOwner != null && pipOwner != this) {
+            Activity currentActivity = themedReactContext.getCurrentActivity();
+            ViewGroup rootView = null;
+            if (currentActivity != null) {
+                View decorView = currentActivity.getWindow().getDecorView();
+                rootView = decorView.findViewById(android.R.id.content);
+            }
+            
+            // Check if the old pipOwner is still valid and actually in PIP mode
+            boolean isOldPipOwnerValid = pipOwner.exoPlayerView != null 
+                && pipOwner.exoPlayerView.getParent() != null
+                && pipOwner.player != null
+                && !pipOwner.viewHasDropped;
+            
+            // Also check if the old pipOwner's view is still in rootView (indicating it's in PIP)
+            boolean isOldPipOwnerInPip = false;
+            if (isOldPipOwnerValid && rootView != null && pipOwner.exoPlayerView.getParent() == rootView) {
+                isOldPipOwnerInPip = true;
+            }
+            
+            if (!isOldPipOwnerValid || !isOldPipOwnerInPip) {
+                pipOwner = null;
+            } else if (isInPictureInPicture) {
+                // We're the pending view (user triggered). Take over from old pipOwner.
+                pipOwner.setIsInPictureInPicture(false);
+                pipOwner = null;
+                DebugLog.d(TAG, "Taking over PIP from previous player");
+            } else {
+                return; // Not entering PIP, ignore
+            }
+        }
         eventEmitter.onPictureInPictureStatusChanged.invoke(isInPictureInPicture);
 
         if (fullScreenPlayerView != null && fullScreenPlayerView.isShowing()) {
@@ -2488,30 +2555,152 @@ public class ReactExoplayerView extends FrameLayout implements
                 LayoutParams.MATCH_PARENT);
 
         if (isInPictureInPicture) {
-            ViewGroup parent = (ViewGroup)exoPlayerView.getParent();
-            if (parent != null) {
-                parent.removeView(exoPlayerView);
+            if (!canEnterPictureInPicture()) {
+                DebugLog.d(TAG, "Cannot enter PIP: player view not ready");
+                return;
             }
+            originalParent = (ViewGroup) exoPlayerView.getParent();
+            if (originalParent != null) {
+                originalIndex = originalParent.indexOfChild(exoPlayerView);
+                originalParent.removeView(exoPlayerView);
+            }
+            pipOwner = this;
+
+            rootViewChildrenVisibility.clear();
+
             for (int i = 0; i < rootView.getChildCount(); i++) {
-                if (rootView.getChildAt(i) != exoPlayerView) {
-                    rootViewChildrenOriginalVisibility.add(rootView.getChildAt(i).getVisibility());
-                    rootView.getChildAt(i).setVisibility(View.GONE);
+                View child = rootView.getChildAt(i);
+                if (child != exoPlayerView) {
+                    rootViewChildrenVisibility.put(child, child.getVisibility());
+                    child.setVisibility(View.GONE);
                 }
             }
+            player.setPlayWhenReady(true);
+            player.play();
+
             rootView.addView(exoPlayerView, layoutParams);
         } else {
-            rootView.removeView(exoPlayerView);
-            if (!rootViewChildrenOriginalVisibility.isEmpty()) {
-                for (int i = 0; i < rootView.getChildCount(); i++) {
-                    rootView.getChildAt(i).setVisibility(rootViewChildrenOriginalVisibility.get(i));
-                }
-                addView(exoPlayerView, 0, layoutParams);
-                reLayoutControls();
+            // Remove player view from rootView if it's there (from PIP mode)
+            ViewGroup currentParent = (ViewGroup) exoPlayerView.getParent();
+            if (currentParent != null && currentParent.equals(rootView)) {
+                rootView.removeView(exoPlayerView);
             }
+            
+            // Restore visibility of other rootView children first
+            for (Map.Entry<View, Integer> entry : rootViewChildrenVisibility.entrySet()) {
+                View child = entry.getKey();
+                child.setVisibility(entry.getValue());
+                // Request layout for each restored view to ensure proper rendering
+                if (child.getParent() != null) {
+                    ((ViewGroup) child.getParent()).requestLayout();
+                }
+            }
+
+            rootViewChildrenVisibility.clear();
+            
+            // Restore player view to its original parent temporarily (needed for fullScreenPlayerView)
+            if (originalParent != null && exoPlayerView.getParent() == null) {
+                originalParent.addView(exoPlayerView, originalIndex);
+                // Request layout to ensure the view hierarchy is properly updated
+                originalParent.requestLayout();
+                originalParent.invalidate();
+            }
+            
+            // Enter fullscreen mode after exiting PIP for a brief moment, then exit
+            // This ensures the player view is properly restored and then returned to normal state
+            // Use a small delay to ensure the view is properly restored first
+            if (originalParent != null) {
+                Handler handler = new Handler(Looper.getMainLooper());
+                handler.post(() -> {
+                    // Check if fullscreen view already exists and is showing
+                    if (fullScreenPlayerView != null && fullScreenPlayerView.isShowing()) {
+                        // Already in fullscreen, just exit it after 200ms
+                        handler.postDelayed(() -> {
+                            setFullscreen(false);
+                        }, 200);
+                        return;
+                    }
+                    // Ensure we can enter fullscreen by resetting state if needed
+                    if (isFullscreen) {
+                        // If state says fullscreen but view isn't showing, reset and show
+                        isFullscreen = false;
+                    }
+                    setFullscreen(true);
+                    // Exit fullscreen after 200ms
+                    handler.postDelayed(() -> {
+                        setFullscreen(false);
+                    }, 200);
+                });
+            }
+            
+            pipOwner = null;
+            originalParent = null;
+            originalIndex = -1;
+            pendingPipEnterView = null;
         }
     }
 
+    /**
+     * Get the visible area size of the player view in pixels
+     * Returns 0 if the view is not visible
+     */
+    private int getPlayerViewVisibleArea() {
+        return getPlayerViewVisibleArea(this);
+    }
+    
+    /**
+     * Get the visible area size of a player view in pixels
+     * Returns 0 if the view is not visible
+     */
+    private static int getPlayerViewVisibleArea(ReactExoplayerView playerView) {
+        if (playerView == null || playerView.exoPlayerView == null) {
+            return 0;
+        }
+        
+        // Check if view is attached to window
+        if (!playerView.exoPlayerView.isAttachedToWindow()) {
+            return 0;
+        }
+        
+        // Check if view visibility is VISIBLE
+        if (playerView.exoPlayerView.getVisibility() != View.VISIBLE) {
+            return 0;
+        }
+        
+        // Check if view has a visible area on screen
+        Rect visibleRect = new Rect();
+        boolean isVisible = playerView.exoPlayerView.getGlobalVisibleRect(visibleRect);
+        
+        if (!isVisible) {
+            return 0;
+        }
+        
+        // Return the visible area (width * height)
+        return visibleRect.width() * visibleRect.height();
+    }
+    
+    /**
+     * Minimal check that the player view can be moved (attached, visible, has parent).
+     * We no longer use a strict visible-area check - it blocked PIP after scrolling because
+     * getGlobalVisibleRect can report 0/small area before layout stabilizes.
+     * The user explicitly triggers PIP on the current video; pendingPipEnterView ensures
+     * only that view moves.
+     */
+    private boolean canEnterPictureInPicture() {
+        if (exoPlayerView == null) return false;
+        if (!exoPlayerView.isAttachedToWindow()) return false;
+        if (exoPlayerView.getVisibility() != View.VISIBLE) return false;
+        if (exoPlayerView.getParent() == null || !(exoPlayerView.getParent() instanceof ViewGroup)) return false;
+        return true;
+    }
+
     public void enterPictureInPictureMode() {
+        if (!canEnterPictureInPicture()) {
+            DebugLog.d(TAG, "Cannot enter PIP: player view not ready (attached, visible, has parent)");
+            return;
+        }
+        pendingPipEnterView = this;
+
         PictureInPictureParams _pipParams = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ArrayList<RemoteAction> actions = PictureInPictureUtil.getPictureInPictureActions(themedReactContext, isPaused, pictureInPictureReceiver);
@@ -2528,19 +2717,15 @@ public class ReactExoplayerView extends FrameLayout implements
         Activity currentActivity = themedReactContext.getCurrentActivity();
         if (currentActivity == null) return;
 
-        View decorView = currentActivity.getWindow().getDecorView();
-        ViewGroup rootView = decorView.findViewById(android.R.id.content);
-
-        if (!rootViewChildrenOriginalVisibility.isEmpty()) {
-            if (exoPlayerView.getParent().equals(rootView)) rootView.removeView(exoPlayerView);
-            for (int i = 0; i < rootView.getChildCount(); i++) {
-                rootView.getChildAt(i).setVisibility(rootViewChildrenOriginalVisibility.get(i));
-            }
-            rootViewChildrenOriginalVisibility.clear();
-        }
-
+        // The restoration is handled by setIsInPictureInPicture(false) which is called
+        // automatically when PIP mode changes. This method just ensures we exit PIP mode.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && currentActivity.isInPictureInPictureMode()) {
             currentActivity.moveTaskToBack(false);
+        }
+        
+        // Ensure restoration happens if not already done
+        if (pipOwner == this) {
+            setIsInPictureInPicture(false);
         }
     }
 
