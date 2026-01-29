@@ -116,7 +116,8 @@ object PictureInPictureUtil {
         updatePictureInPictureActions(context, pipParamsBuilder.build())
     }
 
-    private fun updatePictureInPictureActions(context: ThemedReactContext, pipParams: PictureInPictureParams) {
+    @JvmStatic
+    fun updatePictureInPictureActions(context: ThemedReactContext, pipParams: PictureInPictureParams) {
         if (!isSupportPictureInPictureAction()) return
         if (!isSupportPictureInPicture(context)) return
         try {
@@ -154,19 +155,28 @@ object PictureInPictureUtil {
 
     @JvmStatic
     @RequiresApi(Build.VERSION_CODES.O)
-    fun calcPictureInPictureAspectRatio(player: ExoPlayer): Rational {
-        var aspectRatio = Rational(player.videoSize.width, player.videoSize.height)
-        // AspectRatio for the activity in picture-in-picture, must be between 2.39:1 and 1:2.39 (inclusive).
-        // https://developer.android.com/reference/android/app/PictureInPictureParams.Builder#setAspectRatio(android.util.Rational)
-        val maximumRatio = Rational(239, 100)
-        val minimumRatio = Rational(100, 239)
-        if (aspectRatio.toFloat() > maximumRatio.toFloat()) {
-            aspectRatio = maximumRatio
-        } else if (aspectRatio.toFloat() < minimumRatio.toFloat()) {
-            aspectRatio = minimumRatio
-        }
-        return aspectRatio
+    fun calcPictureInPictureAspectRatio(player: ExoPlayer): Rational? {
+        val videoSize = player.videoSize
+        val width = videoSize.width
+        val height = videoSize.height
+
+        // 🚨 INVALID STATES
+        if (width <= 0 || height <= 0) return null
+
+        var ratio = width.toFloat() / height.toFloat()
+
+        // Android limits
+        val MAX = 2.39f
+        val MIN = 1f / 2.39f
+
+        ratio = ratio.coerceIn(MIN, MAX)
+
+        return Rational(
+            (ratio * 1000).toInt(),
+            1000
+        )
     }
+
 
     private fun isSupportPictureInPicture(context: ThemedReactContext): Boolean =
         checkIsApiSupport() && checkIsSystemSupportPIP(context) && checkIsUserAllowPIP(context)

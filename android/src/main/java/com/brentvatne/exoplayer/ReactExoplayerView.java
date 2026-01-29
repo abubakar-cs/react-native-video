@@ -24,8 +24,8 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
-import android.graphics.Rect;
 import android.text.TextUtils;
+import android.util.Rational;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.CaptioningManager;
@@ -52,6 +52,7 @@ import androidx.media3.common.Timeline;
 import androidx.media3.common.TrackGroup;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
+import androidx.media3.common.VideoSize;
 import androidx.media3.common.text.CueGroup;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSource;
@@ -227,9 +228,9 @@ public class ReactExoplayerView extends FrameLayout implements
     private boolean useCache = false;
     private boolean disableCache = false;
     private ControlsConfig controlsConfig = new ControlsConfig();
-    private ArrayList<Integer> rootViewChildrenOriginalVisibility = new ArrayList<Integer>();
     private final Map<View, Integer> rootViewChildrenVisibility = new HashMap<>();
     private static ReactExoplayerView pipOwner;
+    private Rational lastPipAspectRatio;
 
     /**
      * The view that explicitly requested PIP (enterPictureInPictureMode).
@@ -1436,6 +1437,38 @@ public class ReactExoplayerView extends FrameLayout implements
     }
 
     @Override
+    public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (viewHasDropped) return;
+            if (player == null) return;
+            if (videoSize.width <= 0 || videoSize.height <= 0) return;
+            if (themedReactContext == null) return;
+            if (themedReactContext.getCurrentActivity() == null) return;
+
+            if (!canEnterPictureInPicture()) return;
+            if (player.getPlaybackState() != Player.STATE_READY) return;
+
+            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(player);
+            if (ratio == null) return;
+
+            if (lastPipAspectRatio != null && lastPipAspectRatio.equals(ratio)) {
+                return;
+            }
+            lastPipAspectRatio = ratio;
+
+            pendingPipEnterView = this;
+            pictureInPictureParamsBuilder.setAspectRatio(ratio);
+
+            // Update only, don't force enter
+            PictureInPictureUtil.updatePictureInPictureActions(
+                    themedReactContext,
+                    pictureInPictureParamsBuilder.build()
+            );
+
+        }
+    }
+
+    @Override
     public void onEvents(@NonNull Player player, Player.Events events) {
         if (events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED) || events.contains(Player.EVENT_PLAY_WHEN_READY_CHANGED)) {
             int playbackState = player.getPlaybackState();
@@ -2638,45 +2671,6 @@ public class ReactExoplayerView extends FrameLayout implements
             originalIndex = -1;
             pendingPipEnterView = null;
         }
-    }
-
-    /**
-     * Get the visible area size of the player view in pixels
-     * Returns 0 if the view is not visible
-     */
-    private int getPlayerViewVisibleArea() {
-        return getPlayerViewVisibleArea(this);
-    }
-    
-    /**
-     * Get the visible area size of a player view in pixels
-     * Returns 0 if the view is not visible
-     */
-    private static int getPlayerViewVisibleArea(ReactExoplayerView playerView) {
-        if (playerView == null || playerView.exoPlayerView == null) {
-            return 0;
-        }
-        
-        // Check if view is attached to window
-        if (!playerView.exoPlayerView.isAttachedToWindow()) {
-            return 0;
-        }
-        
-        // Check if view visibility is VISIBLE
-        if (playerView.exoPlayerView.getVisibility() != View.VISIBLE) {
-            return 0;
-        }
-        
-        // Check if view has a visible area on screen
-        Rect visibleRect = new Rect();
-        boolean isVisible = playerView.exoPlayerView.getGlobalVisibleRect(visibleRect);
-        
-        if (!isVisible) {
-            return 0;
-        }
-        
-        // Return the visible area (width * height)
-        return visibleRect.width() * visibleRect.height();
     }
     
     /**
