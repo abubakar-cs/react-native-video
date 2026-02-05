@@ -6,6 +6,10 @@ import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.View
 import android.view.View.MeasureSpec
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.TextureView
+import android.graphics.SurfaceTexture
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.media3.common.Player
@@ -17,6 +21,7 @@ import androidx.media3.ui.DefaultTimeBar
 import androidx.media3.ui.PlayerView
 import com.brentvatne.common.api.ResizeMode
 import com.brentvatne.common.api.SubtitleStyle
+
 
 @UnstableApi
 class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0) :
@@ -139,9 +144,73 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
         playerView.setShutterBackgroundColor(color)
     }
 
-    fun updateSurfaceView(viewType: Int) {
-        // TODO: Implement proper surface type switching if needed
+    private fun attachSurfaceCallbacks(surfaceView: SurfaceView) {
+        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                // no-op
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                // 🔥 SCREEN OFF / PIP / APP BACKGROUND
+                playerView.player?.playWhenReady = false
+            }
+
+            override fun surfaceChanged(
+                holder: SurfaceHolder,
+                format: Int,
+                width: Int,
+                height: Int
+            ) {
+                // no-op
+            }
+        })
     }
+
+    private fun attachTextureListener(textureView: TextureView) {
+        textureView.surfaceTextureListener =
+            object : TextureView.SurfaceTextureListener {
+
+                override fun onSurfaceTextureAvailable(
+                    surface: SurfaceTexture,
+                    width: Int,
+                    height: Int
+                ) {
+                    // no-op
+                }
+
+                override fun onSurfaceTextureSizeChanged(
+                    surface: SurfaceTexture,
+                    width: Int,
+                    height: Int
+                ) {
+                    // no-op
+                }
+
+                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                    // 🔥 SCREEN OFF / PIP / APP BACKGROUND
+                    playerView.player?.playWhenReady = false
+                    return true
+                }
+
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                    // no-op
+                }
+            }
+    }
+
+
+    fun updateSurfaceView(viewType: Int) {
+        when (val videoSurfaceView = playerView.videoSurfaceView) {
+            is SurfaceView -> {
+                attachSurfaceCallbacks(videoSurfaceView)
+            }
+
+            is TextureView -> {
+                attachTextureListener(videoSurfaceView)
+            }
+        }
+    }
+
 
     val isPlaying: Boolean
         get() = playerView.player?.isPlaying ?: false
