@@ -2606,9 +2606,15 @@ public class ReactExoplayerView extends FrameLayout implements
                 }
             }
             player.setPlayWhenReady(true);
+            player.play();
 
             rootView.addView(exoPlayerView, layoutParams);
         } else {
+
+            if (player != null) {
+                player.setPlayWhenReady(false);
+                player.pause();
+            }
             // Remove player view from rootView if it's there (from PIP mode)
             ViewGroup currentParent = (ViewGroup) exoPlayerView.getParent();
             if (currentParent != null && currentParent.equals(rootView)) {
@@ -2663,11 +2669,6 @@ public class ReactExoplayerView extends FrameLayout implements
                         setFullscreen(false);
                     }, 200);
                 });
-            }
-
-            if (player.getPlayWhenReady()) {
-                player.setPlayWhenReady(false);
-                player.pause();
             }
             
             pipOwner = null;
