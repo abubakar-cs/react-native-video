@@ -2587,6 +2587,8 @@ public class ReactExoplayerView extends FrameLayout implements
                 DebugLog.d(TAG, "Cannot enter PIP: player view not ready");
                 return;
             }
+
+            exoPlayerView.setIsInPictureInPictureMode(true);
             currentActivity.getWindow()
                     .addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             originalParent = (ViewGroup) exoPlayerView.getParent();
@@ -2670,7 +2672,9 @@ public class ReactExoplayerView extends FrameLayout implements
                     }, 200);
                 });
             }
-            
+            exoPlayerView.setIsInPictureInPictureMode(false);
+
+
             pipOwner = null;
             originalParent = null;
             originalIndex = -1;

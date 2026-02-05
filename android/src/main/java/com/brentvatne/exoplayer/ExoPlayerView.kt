@@ -29,6 +29,10 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
 
     private var localStyle = SubtitleStyle()
     private var pendingResizeMode: Int? = null
+
+    @Volatile
+    private var isInPipMode: Boolean = false
+
     private val liveBadge: TextView = TextView(context).apply {
         text = "LIVE"
         setTextColor(Color.WHITE)
@@ -112,6 +116,10 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
         requestLayout()
     }
 
+    fun setIsInPictureInPictureMode(isInPip: Boolean) {
+        isInPipMode = isInPip
+    }
+
     fun setSubtitleStyle(style: SubtitleStyle) {
         playerView.subtitleView?.let { subtitleView ->
             // Reset to defaults
@@ -146,13 +154,19 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
 
     private fun attachSurfaceCallbacks(surfaceView: SurfaceView) {
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+
             override fun surfaceCreated(holder: SurfaceHolder) {
                 // no-op
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // 🔥 SCREEN OFF / PIP / APP BACKGROUND
-                playerView.player?.playWhenReady = false
+                // 🔥 ONLY when THIS view is in PIP
+                if (!isInPipMode) return
+
+                val player = playerView.player ?: return
+
+                player.playWhenReady = false
+                player.pause()
             }
 
             override fun surfaceChanged(
@@ -187,8 +201,17 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
                 }
 
                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                    // 🔥 SCREEN OFF / PIP / APP BACKGROUND
-                    playerView.player?.playWhenReady = false
+                    // 🔥 ONLY pause when we're actually exiting PIP
+                    if (!isInPipMode) {
+                        return false
+                    }
+
+                    playerView.player?.let { player ->
+                        player.playWhenReady = false
+                        player.pause()
+                    }
+
+                    // true = we release the SurfaceTexture (safe for PIP exit)
                     return true
                 }
 
@@ -197,7 +220,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
                 }
             }
     }
-
 
     fun updateSurfaceView(viewType: Int) {
         when (val videoSurfaceView = playerView.videoSurfaceView) {
