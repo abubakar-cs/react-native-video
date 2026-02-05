@@ -166,7 +166,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
                 val player = playerView.player ?: return
 
                 player.playWhenReady = false
-                player.pause()
             }
 
             override fun surfaceChanged(
@@ -208,7 +207,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
 
                     playerView.player?.let { player ->
                         player.playWhenReady = false
-                        player.pause()
                     }
 
                     // true = we release the SurfaceTexture (safe for PIP exit)
