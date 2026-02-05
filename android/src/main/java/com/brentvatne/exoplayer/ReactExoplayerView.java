@@ -29,6 +29,7 @@ import android.util.Rational;
 import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.accessibility.CaptioningManager;
 import android.widget.FrameLayout;
 
@@ -2586,6 +2587,8 @@ public class ReactExoplayerView extends FrameLayout implements
                 DebugLog.d(TAG, "Cannot enter PIP: player view not ready");
                 return;
             }
+            currentActivity.getWindow()
+                    .addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             originalParent = (ViewGroup) exoPlayerView.getParent();
             if (originalParent != null) {
                 originalIndex = originalParent.indexOfChild(exoPlayerView);
@@ -2603,7 +2606,6 @@ public class ReactExoplayerView extends FrameLayout implements
                 }
             }
             player.setPlayWhenReady(true);
-            player.play();
 
             rootView.addView(exoPlayerView, layoutParams);
         } else {
@@ -2612,6 +2614,9 @@ public class ReactExoplayerView extends FrameLayout implements
             if (currentParent != null && currentParent.equals(rootView)) {
                 rootView.removeView(exoPlayerView);
             }
+
+            currentActivity.getWindow()
+                    .clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             
             // Restore visibility of other rootView children first
             for (Map.Entry<View, Integer> entry : rootViewChildrenVisibility.entrySet()) {
@@ -2658,6 +2663,11 @@ public class ReactExoplayerView extends FrameLayout implements
                         setFullscreen(false);
                     }, 200);
                 });
+            }
+
+            if (player.getPlayWhenReady()) {
+                player.setPlayWhenReady(false);
+                player.pause();
             }
             
             pipOwner = null;
