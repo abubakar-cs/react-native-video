@@ -2115,8 +2115,62 @@ public class ReactExoplayerView extends FrameLayout implements
 
             if (!isSourceEqual) {
                 hasVideoEnded = false;
-                playerNeedsSource = true;
-                initializePlayer();
+                if (player != null) {
+                    // Player already exists: change source on existing player without full reinit.
+                    // Avoids decoder/surface issues (e.g. PIP "previous generation"). Run on UI thread
+                    // to avoid wrong-thread access and to prevent blocking caller (ANR).
+                    disableCache = ReactNativeVideoManager.Companion.getInstance().shouldDisableCache(source);
+                    if (!source.isLocalAssetFile() && !source.isAsset() && source.getBufferConfig().getCacheSize() > 0) {
+                        RNVSimpleCache.INSTANCE.setSimpleCache(this.getContext(), source.getBufferConfig().getCacheSize());
+                        useCache = true;
+                    } else {
+                        useCache = false;
+                    }
+                    final Source runningSource = this.source;
+                    UiThreadUtil.runOnUiThread(() -> {
+                        if (viewHasDropped || this.source != runningSource || player == null) {
+                            return;
+                        }
+                        exoPlayerView.invalidateAspectRatio();
+                        try {
+                            player.stop();
+                            player.clearMediaItems();
+                            player.clearAuxEffectInfo();
+
+                            if (adsLoader != null) {
+                                adsLoader.release();
+                                adsLoader = null;
+                            }
+                            if (daiAdsLoader != null) {
+                                daiAdsLoader.release();
+                                daiAdsLoader = null;
+                            }
+
+                            mainHandler.postDelayed(() -> {
+                                if (viewHasDropped || this.source != runningSource || player == null) return;
+                                try {
+                                    initializePlayerSource(runningSource);
+                                    setPlayWhenReady(!isPaused);
+                                } catch (Exception ex) {
+                                    playerNeedsSource = true;
+                                    DebugLog.e(TAG, "Failed to set source on existing player");
+                                    DebugLog.e(TAG, ex.toString());
+                                    ex.printStackTrace();
+                                    eventEmitter.onVideoError.invoke(ex.toString(), ex, "1001");
+                                 }
+                            }, 100);
+                        } catch (Exception ex) {
+                            playerNeedsSource = true;
+                            DebugLog.e(TAG, "Failed to set source on existing player");
+                            DebugLog.e(TAG, ex.toString());
+                            ex.printStackTrace();
+                            eventEmitter.onVideoError.invoke(ex.toString(), ex, "1001");
+                        }
+                    });
+                } else {
+                    playerNeedsSource = true;
+                    initializePlayer();
+                }
             }
         } else {
             clearSrc();
