@@ -2146,19 +2146,9 @@ public class ReactExoplayerView extends FrameLayout implements
                                 daiAdsLoader = null;
                             }
 
-                            mainHandler.postDelayed(() -> {
-                                if (viewHasDropped || this.source != runningSource || player == null) return;
-                                try {
-                                    initializePlayerSource(runningSource);
-                                    setPlayWhenReady(!isPaused);
-                                } catch (Exception ex) {
-                                    playerNeedsSource = true;
-                                    DebugLog.e(TAG, "Failed to set source on existing player");
-                                    DebugLog.e(TAG, ex.toString());
-                                    ex.printStackTrace();
-                                    eventEmitter.onVideoError.invoke(ex.toString(), ex, "1001");
-                                 }
-                            }, 100);
+                            initializePlayerSource(runningSource);
+                            setPlayWhenReady(!isPaused);
+                               
                         } catch (Exception ex) {
                             playerNeedsSource = true;
                             DebugLog.e(TAG, "Failed to set source on existing player");
