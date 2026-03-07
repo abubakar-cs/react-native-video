@@ -218,6 +218,8 @@ public class ReactExoplayerView extends FrameLayout implements
     private boolean selectTrackWhenReady = false;
     private final Handler mainHandler;
     private Runnable mainRunnable;
+    /** Pending deferred runnable for source change; cancelled when starting a new source change to avoid duplicate work and ANR. */
+    private Runnable pendingSourceChangeRunnable;
     private Runnable pipListenerUnsubscribe;
     private boolean useCache = false;
     private boolean disableCache = false;
@@ -1276,6 +1278,10 @@ public class ReactExoplayerView extends FrameLayout implements
             mainHandler.removeCallbacks(mainRunnable);
             mainRunnable = null;
         }
+        if (mainHandler != null && pendingSourceChangeRunnable != null) {
+            mainHandler.removeCallbacks(pendingSourceChangeRunnable);
+            pendingSourceChangeRunnable = null;
+        }
     }
 
     private static class OnAudioFocusChangedListener implements AudioManager.OnAudioFocusChangeListener {
@@ -2117,8 +2123,8 @@ public class ReactExoplayerView extends FrameLayout implements
                 hasVideoEnded = false;
                 if (player != null) {
                     // Player already exists: change source on existing player without full reinit.
-                    // Avoids decoder/surface issues (e.g. PIP "previous generation"). Run on UI thread
-                    // to avoid wrong-thread access and to prevent blocking caller (ANR).
+                    // Run on UI thread so setSrc() returns immediately (ANR-free) and player is only touched on main thread.
+                    // Defer heavy work (initializePlayerSource) with postDelayed to avoid blocking one thread for too long.
                     disableCache = ReactNativeVideoManager.Companion.getInstance().shouldDisableCache(source);
                     if (!source.isLocalAssetFile() && !source.isAsset() && source.getBufferConfig().getCacheSize() > 0) {
                         RNVSimpleCache.INSTANCE.setSimpleCache(this.getContext(), source.getBufferConfig().getCacheSize());
@@ -2132,11 +2138,15 @@ public class ReactExoplayerView extends FrameLayout implements
                             return;
                         }
                         exoPlayerView.invalidateAspectRatio();
+                        if (pendingSourceChangeRunnable != null) {
+                            mainHandler.removeCallbacks(pendingSourceChangeRunnable);
+                            pendingSourceChangeRunnable = null;
+                        }
                         try {
                             player.stop();
                             player.clearMediaItems();
                             player.clearAuxEffectInfo();
-
+                            clearProgressMessageHandler();
                             if (adsLoader != null) {
                                 adsLoader.release();
                                 adsLoader = null;
@@ -2145,10 +2155,24 @@ public class ReactExoplayerView extends FrameLayout implements
                                 daiAdsLoader.release();
                                 daiAdsLoader = null;
                             }
-
-                            initializePlayerSource(runningSource);
-                            setPlayWhenReady(!isPaused);
-                               
+                            // Defer heavy work to next message loop so this frame stays light (reduces ANR).
+                            pendingSourceChangeRunnable = () -> {
+                                pendingSourceChangeRunnable = null;
+                                if (viewHasDropped || this.source != runningSource || player == null) {
+                                    return;
+                                }
+                                try {
+                                    initializePlayerSource(runningSource);
+                                    setPlayWhenReady(!isPaused);
+                                } catch (Exception ex) {
+                                    playerNeedsSource = true;
+                                    DebugLog.e(TAG, "Failed to set source on existing player");
+                                    DebugLog.e(TAG, ex.toString());
+                                    ex.printStackTrace();
+                                    eventEmitter.onVideoError.invoke(ex.toString(), ex, "1001");
+                                }
+                            };
+                            mainHandler.postDelayed(pendingSourceChangeRunnable, 300);
                         } catch (Exception ex) {
                             playerNeedsSource = true;
                             DebugLog.e(TAG, "Failed to set source on existing player");
