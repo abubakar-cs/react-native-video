@@ -12,6 +12,8 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Process
 import android.util.Rational
+import android.util.TypedValue
+import android.view.WindowInsets
 import androidx.activity.ComponentActivity
 import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.annotation.RequiresApi
@@ -36,6 +38,8 @@ internal fun Context.findActivity(): ComponentActivity {
 object PictureInPictureUtil {
     private const val FLAG_SUPPORTS_PICTURE_IN_PICTURE = 0x400000
     private const val TAG = "PictureInPictureUtil"
+    /** Assumed height of 3-button navigation bar (dp). When gesture nav is on, we subtract this from screen height so PIP matches button-nav behavior. */
+    private const val ASSUMED_BUTTON_NAV_BAR_HEIGHT_DP = 48f
 
     @JvmStatic
     fun addLifecycleEventListener(context: ThemedReactContext, view: ReactExoplayerView): Runnable {
@@ -155,28 +159,102 @@ object PictureInPictureUtil {
 
     @JvmStatic
     @RequiresApi(Build.VERSION_CODES.O)
-    fun calcPictureInPictureAspectRatio(player: ExoPlayer): Rational? {
+    fun calcPictureInPictureAspectRatio(player: ExoPlayer): Rational? =
+        calcPictureInPictureAspectRatio(null, player)
+
+    @JvmStatic
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun calcPictureInPictureAspectRatio(context: ThemedReactContext?, player: ExoPlayer): Rational? {
         val videoSize = player.videoSize
-        val width = videoSize.width
-        val height = videoSize.height
+        var width = videoSize.width
+        var height = videoSize.height
 
         // 🚨 INVALID STATES
         if (width <= 0 || height <= 0) return null
 
-        var ratio = width.toFloat() / height.toFloat()
+        // Use display dimensions: swap when rotation is 90° or 270° so PIP window matches rendered orientation
+        val rotation = videoSize.unappliedRotationDegrees
+        if (rotation == 90 || rotation == 270) {
+            val tmp = width
+            width = height
+            height = tmp
+        }
 
-        // Android limits
+        // Account for non-square pixels (anamorphic)
+        val pixelRatio = videoSize.pixelWidthHeightRatio
+        val displayWidth = width * pixelRatio
+        val displayHeight = height.toFloat()
+        var ratio = displayWidth / displayHeight
+
+        // With gesture navigation, PIP gets more height than with button nav, then adjusts → video looks zoomed.
+        // When gesture nav is on: subtract assumed button nav bar height from screen height so PIP is sized like with button nav.
+        var usedAdjustedRatio = false
+        if (context != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val activity = context.findActivity()
+                val decorView = activity.window?.decorView
+                val insets = decorView?.rootWindowInsets ?: null
+                if (insets != null) {
+                    val gestureLeft: Int
+                    val gestureRight: Int
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val gesture = insets.getInsets(WindowInsets.Type.systemGestures())
+                        gestureLeft = gesture.left
+                        gestureRight = gesture.right
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val gesture = insets.getSystemGestureInsets()
+                        gestureLeft = gesture.left
+                        gestureRight = gesture.right
+                    }
+                    val isGestureNav = gestureLeft > 0 || gestureRight > 0
+                    if (isGestureNav) {
+                        val screenHeight = (decorView?.height ?: 0).coerceAtLeast(1)
+                        val assumedNavBarPx = TypedValue.applyDimension(
+                            TypedValue.COMPLEX_UNIT_DIP,
+                            ASSUMED_BUTTON_NAV_BAR_HEIGHT_DP,
+                            context.resources.displayMetrics
+                        ).toInt()
+                        val effectiveHeight = (screenHeight - assumedNavBarPx).coerceAtLeast(1)
+                        if (effectiveHeight < screenHeight) {
+                            ratio = ratio * screenHeight.toFloat() / effectiveHeight
+                            usedAdjustedRatio = true
+                        }
+                    }
+                }
+            } catch (_: Exception) { /* use unadjusted ratio */ }
+        }
+
+        // Android PIP limits (system will reject outside this range)
         val MAX = 2.39f
         val MIN = 1f / 2.39f
-
         ratio = ratio.coerceIn(MIN, MAX)
 
-        return Rational(
-            (ratio * 1000).toInt(),
-            1000
-        )
+        // Prefer exact Rational for common ratios only when we didn't apply gesture adjustment
+        if (!usedAdjustedRatio) {
+            val exact = toExactRational(ratio)
+            if (exact != null) return exact
+        }
+
+        // Fallback: use Rational with good precision
+        val num = (ratio * 1000).toInt().coerceIn(1, 2390)
+        return Rational(num, 1000)
     }
 
+    /**
+     * Return an exact Rational for common aspect ratios to avoid floating-point drift
+     * that can make the PIP window not match the video and cause zoomed/cropped appearance.
+     */
+    @JvmStatic
+    private fun toExactRational(ratio: Float): Rational? {
+        return when {
+            ratio >= 0.55f && ratio <= 0.57f -> Rational(9, 16)  // 9:16 portrait
+            ratio >= 1.32f && ratio <= 1.35f -> Rational(4, 3)   // 4:3
+            ratio >= 0.74f && ratio <= 0.76f -> Rational(3, 4)   // 3:4 portrait
+            ratio >= 0.98f && ratio <= 1.02f -> Rational(1, 1)   // 1:1
+            else -> null
+        }
+    }
 
     private fun isSupportPictureInPicture(context: ThemedReactContext): Boolean =
         checkIsApiSupport() && checkIsSystemSupportPIP(context) && checkIsUserAllowPIP(context)

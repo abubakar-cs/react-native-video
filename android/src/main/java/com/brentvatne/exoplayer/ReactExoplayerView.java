@@ -346,6 +346,7 @@ public class ReactExoplayerView extends FrameLayout implements
         this.bandwidthMeter = config.getBandwidthMeter();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && pictureInPictureParamsBuilder == null) {
             this.pictureInPictureParamsBuilder = new PictureInPictureParams.Builder();
+            this.pictureInPictureParamsBuilder.setAspectRatio(new Rational(9, 16));
         }
         mainHandler = new Handler();
 
@@ -1448,7 +1449,7 @@ public class ReactExoplayerView extends FrameLayout implements
             if (!canEnterPictureInPicture()) return;
             if (player.getPlaybackState() != Player.STATE_READY) return;
 
-            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(player);
+            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(themedReactContext, player);
             if (ratio == null) return;
 
             if (lastPipAspectRatio != null && lastPipAspectRatio.equals(ratio)) {
@@ -2102,6 +2103,7 @@ public class ReactExoplayerView extends FrameLayout implements
             boolean isSourceEqual = source.isEquals(this.source);
             hasDrmFailed = false;
             this.source = source;
+
             final DataSource.Factory tmpMediaDataSourceFactory =
                     DataSourceUtil.getDefaultDataSourceFactory(this.themedReactContext, bandwidthMeter,
                             source.getHeaders());
@@ -2147,6 +2149,7 @@ public class ReactExoplayerView extends FrameLayout implements
                             player.clearMediaItems();
                             player.clearAuxEffectInfo();
                             clearProgressMessageHandler();
+                            mainHandler.postDelayed(() -> Runtime.getRuntime().gc(), 100);
                             if (adsLoader != null) {
                                 adsLoader.release();
                                 adsLoader = null;
@@ -2172,7 +2175,7 @@ public class ReactExoplayerView extends FrameLayout implements
                                     eventEmitter.onVideoError.invoke(ex.toString(), ex, "1001");
                                 }
                             };
-                            mainHandler.postDelayed(pendingSourceChangeRunnable, 300);
+                            mainHandler.postDelayed(pendingSourceChangeRunnable, 500);
                         } catch (Exception ex) {
                             playerNeedsSource = true;
                             DebugLog.e(TAG, "Failed to set source on existing player");
@@ -2775,8 +2778,14 @@ public class ReactExoplayerView extends FrameLayout implements
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ArrayList<RemoteAction> actions = PictureInPictureUtil.getPictureInPictureActions(themedReactContext, isPaused, pictureInPictureReceiver);
             pictureInPictureParamsBuilder.setActions(actions);
-            if (player.getPlaybackState() == Player.STATE_READY) {
-                pictureInPictureParamsBuilder.setAspectRatio(PictureInPictureUtil.calcPictureInPictureAspectRatio(player));
+            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(themedReactContext, player);
+            // Only set aspect ratio when we have a valid one; otherwise use last known or default 9:16 so we don't use a stale ratio from a previous source (which causes zoomed/cropped PIP)
+            if (ratio != null) {
+                pictureInPictureParamsBuilder.setAspectRatio(ratio);
+            } else if (lastPipAspectRatio != null) {
+                pictureInPictureParamsBuilder.setAspectRatio(lastPipAspectRatio);
+            } else {
+                pictureInPictureParamsBuilder.setAspectRatio(new Rational(9, 16));
             }
             _pipParams = pictureInPictureParamsBuilder.build();
         }
