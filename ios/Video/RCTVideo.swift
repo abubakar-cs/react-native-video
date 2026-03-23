@@ -635,7 +635,11 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
     func setSrc(_ source: NSDictionary!) {
         if self.isSetSourceOngoing || self.nextSource != nil {
             DebugLog("setSrc buffer request")
-            self._player?.replaceCurrentItem(with: nil)
+            // Clearing the current item stops Picture-in-Picture (PiP is tied to the player layer).
+            // While PiP is active, only queue the next source so the in-flight load can finish or chain via applyNextSource.
+            if !isPictureInPictureActive() {
+                self._player?.replaceCurrentItem(with: nil)
+            }
             nextSource = source
             return
         }
@@ -663,9 +667,13 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
                 return
             }
 
-            // Ensure UI operations are performed on main thread
+            // Ensure UI operations are performed on main thread.
+            // Do not remove the player layer while PiP is active: AVPictureInPictureController is bound to that layer,
+            // and removing it ends PiP. Same AVPlayer + replaceCurrentItem (in setupPlayer) keeps PiP alive for the next URL.
             DispatchQueue.main.sync {
-                self.removePlayerLayer()
+                if !self.isPictureInPictureActive() {
+                    self.removePlayerLayer()
+                }
             }
             self._playerObserver.player = nil
             self._drmManager = nil
