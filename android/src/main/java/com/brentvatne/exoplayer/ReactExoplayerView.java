@@ -371,9 +371,15 @@ public class ReactExoplayerView extends FrameLayout implements
                 LayoutParams.MATCH_PARENT,
                 LayoutParams.MATCH_PARENT);
         exoPlayerView = new ExoPlayerView(getContext());
-        exoPlayerView.addOnLayoutChangeListener( (View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) ->
-                PictureInPictureUtil.applySourceRectHint(themedReactContext, pictureInPictureParamsBuilder, exoPlayerView)
-        );
+        exoPlayerView.addOnLayoutChangeListener((View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) -> {
+            // Only the playing cell may push PiP params; other feed cells' layouts overwrite activity params
+            // and cause the first PiP to use a wrong source rect / default landscape window for vertical video.
+            boolean pushToActivity = player != null
+                    && player.getPlayWhenReady()
+                    && player.getPlaybackState() == Player.STATE_READY
+                    && canEnterPictureInPicture();
+            PictureInPictureUtil.applySourceRectHint(themedReactContext, pictureInPictureParamsBuilder, exoPlayerView, pushToActivity);
+        });
         exoPlayerView.setLayoutParams(layoutParams);
         addView(exoPlayerView, 0, layoutParams);
 
@@ -1447,8 +1453,11 @@ public class ReactExoplayerView extends FrameLayout implements
 
             if (!canEnterPictureInPicture()) return;
             if (player.getPlaybackState() != Player.STATE_READY) return;
+            // Feed / list: off-screen pre-buffered cells must not drive PiP params or steal
+            // pendingPipEnterView (static). Only the actively playing surface should update PiP.
+            if (!player.getPlayWhenReady()) return;
 
-            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(player);
+            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(themedReactContext, player);
             if (ratio == null) return;
 
             if (lastPipAspectRatio != null && lastPipAspectRatio.equals(ratio)) {
@@ -1456,7 +1465,6 @@ public class ReactExoplayerView extends FrameLayout implements
             }
             lastPipAspectRatio = ratio;
 
-            pendingPipEnterView = this;
             pictureInPictureParamsBuilder.setAspectRatio(ratio);
 
             // Update only, don't force enter
@@ -2655,6 +2663,17 @@ public class ReactExoplayerView extends FrameLayout implements
                 return;
             }
 
+            // Duplicate PIP enter callbacks (configuration / activity transitions) can fire while the
+            // player is already under the content root. Re-adding would throw "child already has a parent".
+            if (exoPlayerView.getParent() == rootView) {
+                DebugLog.d(TAG, "PIP enter skipped: player view already attached to content root");
+                exoPlayerView.setIsInPictureInPictureMode(true);
+                pipOwner = this;
+                currentActivity.getWindow()
+                        .addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                return;
+            }
+
             exoPlayerView.setIsInPictureInPictureMode(true);
             currentActivity.getWindow()
                     .addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -2677,6 +2696,11 @@ public class ReactExoplayerView extends FrameLayout implements
             player.setPlayWhenReady(true);
             player.play();
 
+            // Defensive: ensure detached before add (covers races where removeView did not run)
+            ViewGroup parentBeforeAdd = (ViewGroup) exoPlayerView.getParent();
+            if (parentBeforeAdd != null) {
+                parentBeforeAdd.removeView(exoPlayerView);
+            }
             rootView.addView(exoPlayerView, layoutParams);
         } else {
 
@@ -2764,19 +2788,44 @@ public class ReactExoplayerView extends FrameLayout implements
         return true;
     }
 
+    /** Auto-enter on leave (and legacy no-arg path): only the actually playing list cell may own PiP. */
     public void enterPictureInPictureMode() {
+        enterPictureInPictureModeInternal(false);
+    }
+
+    /** JS {@code ref.enterPictureInPicture()} — user chose this mount point; allow even when paused. */
+    public void enterPictureInPictureModeFromJs() {
+        enterPictureInPictureModeInternal(true);
+    }
+
+    private void enterPictureInPictureModeInternal(boolean fromJsCommand) {
+        if (player == null) return;
+        // onUserLeaveHint is registered once per list cell; each calls here. Without this guard,
+        // the last cell wins pendingPipEnterView → wrong episode in PiP on first enter.
+        if (!fromJsCommand && !player.getPlayWhenReady()) {
+            DebugLog.d(TAG, "enterPictureInPictureMode ignored: not the playing surface");
+            return;
+        }
         pendingPipEnterView = this;
 
-        PictureInPictureParams _pipParams = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Refresh rect + aspect for *this* player immediately before auto-enter; previously built _pipParams
+            // was never applied, and feed layouts could leave activity PiP params pointing at the wrong cell.
+            PictureInPictureUtil.applySourceRectHint(themedReactContext, pictureInPictureParamsBuilder, exoPlayerView, false);
             ArrayList<RemoteAction> actions = PictureInPictureUtil.getPictureInPictureActions(themedReactContext, isPaused, pictureInPictureReceiver);
             pictureInPictureParamsBuilder.setActions(actions);
-            if (player.getPlaybackState() == Player.STATE_READY) {
-                pictureInPictureParamsBuilder.setAspectRatio(PictureInPictureUtil.calcPictureInPictureAspectRatio(player));
+            Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(themedReactContext, player);
+            if (ratio == null) {
+                ratio = PictureInPictureUtil.aspectRatioFromViewDimensions(exoPlayerView);
             }
-            _pipParams = pictureInPictureParamsBuilder.build();
+            if (ratio != null) {
+                pictureInPictureParamsBuilder.setAspectRatio(ratio);
+                lastPipAspectRatio = ratio;
+            }
+            PictureInPictureParams _pipParams = pictureInPictureParamsBuilder.build();
+            PictureInPictureUtil.updatePictureInPictureActions(themedReactContext, _pipParams);
         }
-        // PictureInPictureUtil.enterPictureInPictureMode(themedReactContext, _pipParams);
+        // Manual enter path (optional): PictureInPictureUtil.enterPictureInPictureMode(themedReactContext, _pipParams);
     }
 
     public void exitPictureInPictureMode() {

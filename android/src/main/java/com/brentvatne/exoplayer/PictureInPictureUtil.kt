@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Process
 import android.util.Rational
 import android.util.TypedValue
+import android.view.View
 import android.view.WindowInsets
 import androidx.activity.ComponentActivity
 import androidx.annotation.ChecksSdkIntAtLeast
@@ -115,9 +116,26 @@ object PictureInPictureUtil {
 
     @JvmStatic
     fun applySourceRectHint(context: ThemedReactContext, pipParamsBuilder: PictureInPictureParams.Builder?, playerView: ExoPlayerView) {
+        applySourceRectHint(context, pipParamsBuilder, playerView, true)
+    }
+
+    /**
+     * Updates source rect hint on the builder. When [pushToActivity] is true, applies params to the activity
+     * (used for auto-enter PiP). Feed/list layouts must not push unless this is the actively playing cell,
+     * or the last layout "wins" with a wrong rect / aspect → landscape-ish PiP and zoom for vertical video.
+     */
+    @JvmStatic
+    fun applySourceRectHint(
+        context: ThemedReactContext,
+        pipParamsBuilder: PictureInPictureParams.Builder?,
+        playerView: ExoPlayerView,
+        pushToActivity: Boolean
+    ) {
         if (pipParamsBuilder == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         pipParamsBuilder.setSourceRectHint(calcRectHint(playerView))
-        updatePictureInPictureActions(context, pipParamsBuilder.build())
+        if (pushToActivity) {
+            updatePictureInPictureActions(context, pipParamsBuilder.build())
+        }
     }
 
     @JvmStatic
@@ -237,6 +255,26 @@ object PictureInPictureUtil {
         }
 
         // Fallback: use Rational with good precision
+        val num = (ratio * 1000).toInt().coerceIn(1, 2390)
+        return Rational(num, 1000)
+    }
+
+    /**
+     * When [ExoPlayer.videoSize] is not ready yet, derive PiP aspect ratio from the player view bounds
+     * (portrait full-bleed feed → portrait PiP window).
+     */
+    @JvmStatic
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun aspectRatioFromViewDimensions(view: View): Rational? {
+        val w = view.width
+        val h = view.height
+        if (w <= 0 || h <= 0) return null
+        var ratio = w.toFloat() / h.toFloat()
+        val MAX = 2.39f
+        val MIN = 1f / 2.39f
+        ratio = ratio.coerceIn(MIN, MAX)
+        val exact = toExactRational(ratio)
+        if (exact != null) return exact
         val num = (ratio * 1000).toInt().coerceIn(1, 2390)
         return Rational(num, 1000)
     }
