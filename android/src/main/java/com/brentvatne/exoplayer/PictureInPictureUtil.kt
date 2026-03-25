@@ -48,6 +48,13 @@ object PictureInPictureUtil {
 
         val onPictureInPictureModeChanged = Consumer<PictureInPictureModeChangedInfo> { info ->
             view.setIsInPictureInPicture(info.isInPictureInPictureMode)
+            // Android 12+: pinch-zoom / drag resize often delivers a non-null newConfig while still in PiP.
+            if (info.isInPictureInPictureMode &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                info.newConfig != null
+            ) {
+                view.onPictureInPictureWindowSizedForBounce()
+            }
             if (!info.isInPictureInPictureMode && activity.lifecycle.currentState == Lifecycle.State.CREATED) {
                 // when user click close button of PIP
                 if (!view.playInBackground) view.setPausedModifier(true)
@@ -211,7 +218,7 @@ object PictureInPictureUtil {
             try {
                 val activity = context.findActivity()
                 val decorView = activity.window?.decorView
-                val insets = decorView?.rootWindowInsets ?: null
+                val insets = decorView?.rootWindowInsets
                 if (insets != null) {
                     val gestureLeft: Int
                     val gestureRight: Int
@@ -221,13 +228,13 @@ object PictureInPictureUtil {
                         gestureRight = gesture.right
                     } else {
                         @Suppress("DEPRECATION")
-                        val gesture = insets.getSystemGestureInsets()
+                        val gesture = insets.systemGestureInsets
                         gestureLeft = gesture.left
                         gestureRight = gesture.right
                     }
                     val isGestureNav = gestureLeft > 0 || gestureRight > 0
                     if (isGestureNav) {
-                        val screenHeight = (decorView?.height ?: 0).coerceAtLeast(1)
+                        val screenHeight = decorView.height.coerceAtLeast(1)
                         val assumedNavBarPx = TypedValue.applyDimension(
                             TypedValue.COMPLEX_UNIT_DIP,
                             ASSUMED_BUTTON_NAV_BAR_HEIGHT_DP,
@@ -304,7 +311,7 @@ object PictureInPictureUtil {
 
     @RequiresApi(Build.VERSION_CODES.N)
     private fun checkIsSystemSupportPIP(context: ThemedReactContext): Boolean {
-        val activity = context.findActivity() ?: return false
+        val activity = context.findActivity()
 
         val isActivitySupportPip = try {
             val activityInfo = activity.packageManager.getActivityInfo(activity.componentName, PackageManager.GET_META_DATA)

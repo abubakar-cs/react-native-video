@@ -17,6 +17,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.graphics.Color;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -28,8 +29,10 @@ import android.text.TextUtils;
 import android.util.Rational;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.accessibility.CaptioningManager;
+import android.view.animation.OvershootInterpolator;
 import android.widget.FrameLayout;
 
 import androidx.activity.OnBackPressedCallback;
@@ -168,6 +171,18 @@ public class ReactExoplayerView extends FrameLayout implements
 
     private static final String TAG = "ReactExoplayerView";
 
+    /** Wait after PiP starts so the content root / PiP shell stabilize before showing the player (reduces wrong crop/zoom). */
+    private static final long PIP_DEFERRED_PLAYER_ATTACH_MS = 700L;
+
+    private static final float PIP_ATTACH_POP_SCALE_START = 0.88f;
+    private static final long PIP_ATTACH_POP_DURATION_MS = 280L;
+    /** Debounce rapid layout passes while the user drags or pinch-zooms the PiP window. */
+    private static final long PIP_RESIZE_POP_DEBOUNCE_MS = 48L;
+    /** Slightly stronger than first attach: pinch-zoom resize “bounce” on {@link #pipPlayerHost}. */
+    private static final float PIP_RESIZE_BOUNCE_SCALE_START = 0.82f;
+    private static final long PIP_RESIZE_BOUNCE_DURATION_MS = 400L;
+    private static final float PIP_RESIZE_BOUNCE_OVERSHOOT_TENSION = 2.15f;
+
     private static final CookieManager DEFAULT_COOKIE_MANAGER;
     private static final int SHOW_PROGRESS = 1;
 
@@ -242,6 +257,27 @@ public class ReactExoplayerView extends FrameLayout implements
     private ViewGroup originalParent;
     private int originalIndex;
 
+    /** Full-screen cover while PiP is active and the player view is not yet on the content root. */
+    private View pipBlankPlaceholder;
+    private Runnable deferredPipAddRunnable;
+
+    /**
+     * Dedicated host for PiP: a single MATCH_PARENT {@link FrameLayout} under {@code android.R.id.content}
+     * that only contains {@link #exoPlayerView}. Avoids attaching the player directly to the activity
+     * content root beside the (hidden) React tree and keeps the PiP subtree minimal.
+     */
+    private FrameLayout pipPlayerHost;
+
+    @Nullable
+    private View.OnLayoutChangeListener pipHostResizePopLayoutListener;
+    private final Runnable pipResizePopDebouncedRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (pipPlayerHost != null && pipOwner == ReactExoplayerView.this) {
+                runPipPlayerHostResizeBounceAnimation(pipPlayerHost);
+            }
+        }
+    };
 
     /*
      * When user is seeking first called is on onPositionDiscontinuity -> DISCONTINUITY_REASON_SEEK
@@ -419,6 +455,9 @@ public class ReactExoplayerView extends FrameLayout implements
     }
 
     public void cleanUpResources() {
+        cancelDeferredPipPlayerAdd();
+        removePipBlankPlaceholder();
+        detachPipPlayerHostKeepExoPlayer();
         stopPlayback();
         themedReactContext.removeLifecycleEventListener(this);
         releasePlayer();
@@ -1447,7 +1486,6 @@ public class ReactExoplayerView extends FrameLayout implements
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (viewHasDropped) return;
             if (player == null) return;
-            if (videoSize.width <= 0 || videoSize.height <= 0) return;
             if (themedReactContext == null) return;
             if (themedReactContext.getCurrentActivity() == null) return;
 
@@ -1458,7 +1496,9 @@ public class ReactExoplayerView extends FrameLayout implements
             if (!player.getPlayWhenReady()) return;
 
             Rational ratio = PictureInPictureUtil.calcPictureInPictureAspectRatio(themedReactContext, player);
-            if (ratio == null) return;
+            if (ratio == null) {
+                ratio = PictureInPictureUtil.aspectRatioFromViewDimensions(exoPlayerView);
+            }
 
             if (lastPipAspectRatio != null && lastPipAspectRatio.equals(ratio)) {
                 return;
@@ -1467,11 +1507,12 @@ public class ReactExoplayerView extends FrameLayout implements
 
             pictureInPictureParamsBuilder.setAspectRatio(ratio);
 
-            // Update only, don't force enter
-            PictureInPictureUtil.updatePictureInPictureActions(
-                    themedReactContext,
-                    pictureInPictureParamsBuilder.build()
-            );
+            PictureInPictureUtil.applySourceRectHint(themedReactContext, pictureInPictureParamsBuilder, exoPlayerView, true);
+            ArrayList<RemoteAction> actions = PictureInPictureUtil.getPictureInPictureActions(themedReactContext, isPaused, pictureInPictureReceiver);
+            pictureInPictureParamsBuilder.setActions(actions);
+
+            PictureInPictureParams _pipParams = pictureInPictureParamsBuilder.build();
+            PictureInPictureUtil.updatePictureInPictureActions(themedReactContext, _pipParams);
 
         }
     }
@@ -2598,11 +2639,266 @@ public class ReactExoplayerView extends FrameLayout implements
         }
     }
 
+    private void cancelDeferredPipPlayerAdd() {
+        if (deferredPipAddRunnable != null) {
+            mainHandler.removeCallbacks(deferredPipAddRunnable);
+            deferredPipAddRunnable = null;
+        }
+    }
+
+    private void removePipBlankPlaceholder() {
+        if (pipBlankPlaceholder == null) {
+            return;
+        }
+        ViewGroup holder = (ViewGroup) pipBlankPlaceholder.getParent();
+        if (holder != null) {
+            holder.removeView(pipBlankPlaceholder);
+        }
+        pipBlankPlaceholder = null;
+    }
+
+    /** True when {@link #exoPlayerView} is shown in PiP under {@code contentRoot} (directly or via {@link #pipPlayerHost}). */
+    private boolean isExoPlayerViewHostedForPip(ViewGroup contentRoot) {
+        if (exoPlayerView == null || contentRoot == null) {
+            return false;
+        }
+        ViewParent p = exoPlayerView.getParent();
+        if (p == contentRoot) {
+            return true;
+        }
+        return pipPlayerHost != null && p == pipPlayerHost && pipPlayerHost.getParent() == contentRoot;
+    }
+
+    /** Remove {@link #exoPlayerView} from {@link #pipPlayerHost} and drop the host from its parent; does not reattach to React. */
+    private void detachPipPlayerHostKeepExoPlayer() {
+        removePipHostResizePopListener();
+        if (pipPlayerHost == null) {
+            return;
+        }
+        pipPlayerHost.animate().cancel();
+        pipPlayerHost.setScaleX(1f);
+        pipPlayerHost.setScaleY(1f);
+        if (exoPlayerView != null && exoPlayerView.getParent() == pipPlayerHost) {
+            pipPlayerHost.removeView(exoPlayerView);
+        }
+        ViewGroup hostParent = (ViewGroup) pipPlayerHost.getParent();
+        if (hostParent != null) {
+            hostParent.removeView(pipPlayerHost);
+        }
+        pipPlayerHost = null;
+    }
+
+    private static void removeViewFromParentIfNeeded(@Nullable View child) {
+        if (child == null) {
+            return;
+        }
+        ViewParent p = child.getParent();
+        if (p instanceof ViewGroup) {
+            ((ViewGroup) p).removeView(child);
+        }
+    }
+
+    /**
+     * Ensures {@link #exoPlayerView} is not nested under {@link #pipPlayerHost} then under {@code contentRoot}.
+     * Configuration / duplicate PiP callbacks can re-run attach; without this, {@link ViewGroup#addView}
+     * throws "child already has a parent".
+     */
+    private void repairPipPlayerHostInContent(ViewGroup contentRoot, LayoutParams hostLp) {
+        if (pipPlayerHost == null || contentRoot == null) {
+            return;
+        }
+        ViewGroup hostParent = (ViewGroup) pipPlayerHost.getParent();
+        if (hostParent != null && hostParent != contentRoot) {
+            hostParent.removeView(pipPlayerHost);
+            hostParent = null;
+        }
+        if (pipPlayerHost.getParent() == null) {
+            contentRoot.addView(pipPlayerHost, hostLp);
+        }
+    }
+
+    private void runPipPlayerHostPopAnimation(@NonNull FrameLayout host) {
+        host.animate().cancel();
+        host.post(() -> {
+            if (host.getParent() == null) {
+                return;
+            }
+            int w = host.getWidth();
+            int h = host.getHeight();
+            if (w <= 0 || h <= 0) {
+                return;
+            }
+            host.setPivotX(w / 2f);
+            host.setPivotY(h / 2f);
+            host.setScaleX(PIP_ATTACH_POP_SCALE_START);
+            host.setScaleY(PIP_ATTACH_POP_SCALE_START);
+            host.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(PIP_ATTACH_POP_DURATION_MS)
+                    .setInterpolator(new OvershootInterpolator(1.2f))
+                    .start();
+        });
+    }
+
+    /**
+     * Elastic bounce when the PiP window size changes (pinch zoom, corner drag, double-tap size).
+     * Uses a deeper pre-scale and higher overshoot than {@link #runPipPlayerHostPopAnimation(FrameLayout)}.
+     */
+    private void runPipPlayerHostResizeBounceAnimation(@NonNull FrameLayout host) {
+        host.animate().cancel();
+        host.post(() -> {
+            if (host.getParent() == null) {
+                return;
+            }
+            int w = host.getWidth();
+            int h = host.getHeight();
+            if (w <= 0 || h <= 0) {
+                return;
+            }
+            host.setPivotX(w / 2f);
+            host.setPivotY(h / 2f);
+            host.setScaleX(PIP_RESIZE_BOUNCE_SCALE_START);
+            host.setScaleY(PIP_RESIZE_BOUNCE_SCALE_START);
+            host.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(PIP_RESIZE_BOUNCE_DURATION_MS)
+                    .setInterpolator(new OvershootInterpolator(PIP_RESIZE_BOUNCE_OVERSHOOT_TENSION))
+                    .start();
+        });
+    }
+
+    /**
+     * PiP shell reported a configuration/geometry change (Android 12+). Coalesced with layout-driven resize.
+     */
+    public void onPictureInPictureWindowSizedForBounce() {
+        if (pipPlayerHost == null || pipOwner != this) {
+            return;
+        }
+        Activity a = themedReactContext.getCurrentActivity();
+        if (a == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !a.isInPictureInPictureMode()) {
+            return;
+        }
+        schedulePipResizePopDebounced();
+    }
+
+    private void schedulePipResizePopDebounced() {
+        mainHandler.removeCallbacks(pipResizePopDebouncedRunnable);
+        mainHandler.postDelayed(pipResizePopDebouncedRunnable, PIP_RESIZE_POP_DEBOUNCE_MS);
+    }
+
+    private void removePipHostResizePopListener() {
+        mainHandler.removeCallbacks(pipResizePopDebouncedRunnable);
+        if (pipHostResizePopLayoutListener != null) {
+            if (pipPlayerHost != null) {
+                pipPlayerHost.removeOnLayoutChangeListener(pipHostResizePopLayoutListener);
+            }
+            if (exoPlayerView != null) {
+                exoPlayerView.removeOnLayoutChangeListener(pipHostResizePopLayoutListener);
+            }
+        }
+        pipHostResizePopLayoutListener = null;
+    }
+
+    /** Fires the same pop animation when the PiP shell changes size (pinch, drag, double-tap). */
+    private void ensurePipHostResizePopListener() {
+        if (pipPlayerHost == null) {
+            return;
+        }
+        if (pipHostResizePopLayoutListener != null) {
+            return;
+        }
+        pipHostResizePopLayoutListener =
+                (v, l, t, r, b, ol, ot, or, ob) -> {
+                    Activity act = themedReactContext.getCurrentActivity();
+                    if (act == null) {
+                        return;
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !act.isInPictureInPictureMode()) {
+                        return;
+                    }
+                    if (pipOwner != ReactExoplayerView.this || pipPlayerHost == null) {
+                        return;
+                    }
+                    if (v != pipPlayerHost && v != exoPlayerView) {
+                        return;
+                    }
+                    int nw = Math.max(0, r - l);
+                    int nh = Math.max(0, b - t);
+                    int ow = Math.max(0, or - ol);
+                    int oh = Math.max(0, ob - ot);
+                    if (ow <= 0 || oh <= 0) {
+                        return;
+                    }
+                    if (nw == ow && nh == oh) {
+                        return;
+                    }
+                    schedulePipResizePopDebounced();
+                };
+        pipPlayerHost.addOnLayoutChangeListener(pipHostResizePopLayoutListener);
+        if (exoPlayerView != null) {
+            exoPlayerView.removeOnLayoutChangeListener(pipHostResizePopLayoutListener);
+            exoPlayerView.addOnLayoutChangeListener(pipHostResizePopLayoutListener);
+        }
+    }
+
+    private void scheduleDeferredPipPlayerAttach(
+            ViewGroup rootView,
+            LayoutParams layoutParams,
+            Activity activity
+    ) {
+        cancelDeferredPipPlayerAdd();
+        deferredPipAddRunnable = () -> {
+            deferredPipAddRunnable = null;
+            if (pipOwner != ReactExoplayerView.this || exoPlayerView == null) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !activity.isInPictureInPictureMode()) {
+                return;
+            }
+            removePipBlankPlaceholder();
+            // Always detach first: duplicate callbacks or overlapping runnables can leave the player
+            // still under pipPlayerHost; addView would then crash.
+            removeViewFromParentIfNeeded(exoPlayerView);
+            if (pipPlayerHost == null) {
+                pipPlayerHost = new FrameLayout(activity);
+                pipPlayerHost.setLayoutParams(layoutParams);
+            } else {
+                pipPlayerHost.animate().cancel();
+                pipPlayerHost.setScaleX(1f);
+                pipPlayerHost.setScaleY(1f);
+            }
+            repairPipPlayerHostInContent(rootView, layoutParams);
+            if (exoPlayerView.getParent() != pipPlayerHost) {
+                pipPlayerHost.addView(exoPlayerView, new FrameLayout.LayoutParams(
+                        LayoutParams.MATCH_PARENT,
+                        LayoutParams.MATCH_PARENT));
+            }
+            pipPlayerHost.bringToFront();
+            pipPlayerHost.requestLayout();
+            exoPlayerView.requestLayout();
+            exoPlayerView.invalidateAspectRatio();
+            runPipPlayerHostPopAnimation(pipPlayerHost);
+            ensurePipHostResizePopListener();
+        };
+        mainHandler.postDelayed(deferredPipAddRunnable, PIP_DEFERRED_PLAYER_ATTACH_MS);
+    }
+
     protected void setIsInPictureInPicture(boolean isInPictureInPicture) {
         if (isInPictureInPicture) {
-            // Only the view that triggered enterPictureInPictureMode() should move to rootView.
-            // The activity PIP callback fires for all views; ignore if we're not the trigger.
-            if (pendingPipEnterView != this) {
+            // PiP callback is registered on every mounted cell. Prefer explicit pendingPipEnterView
+            // (enterPictureInPictureMode / user leave hint). System auto-enter (e.g. setAutoEnterEnabled)
+            // can deliver onPictureInPictureModeChanged BEFORE onUserLeaveHint, so pending stays null.
+            // Any check of (pendingPipEnterView != this) would be true for all views when pending is null.
+            if (pendingPipEnterView != null) {
+                if (pendingPipEnterView != this) {
+                    return;
+                }
+            } else if (!isPlayingSurfaceForPictureInPictureEnter()) {
                 return;
             }
             pendingPipEnterView = null;
@@ -2625,7 +2921,7 @@ public class ReactExoplayerView extends FrameLayout implements
             
             // Also check if the old pipOwner's view is still in rootView (indicating it's in PIP)
             boolean isOldPipOwnerInPip = false;
-            if (isOldPipOwnerValid && rootView != null && pipOwner.exoPlayerView.getParent() == rootView) {
+            if (isOldPipOwnerValid && rootView != null && pipOwner.isExoPlayerViewHostedForPip(rootView)) {
                 isOldPipOwnerInPip = true;
             }
             
@@ -2665,14 +2961,20 @@ public class ReactExoplayerView extends FrameLayout implements
 
             // Duplicate PIP enter callbacks (configuration / activity transitions) can fire while the
             // player is already under the content root. Re-adding would throw "child already has a parent".
-            if (exoPlayerView.getParent() == rootView) {
-                DebugLog.d(TAG, "PIP enter skipped: player view already attached to content root");
+            if (isExoPlayerViewHostedForPip(rootView)) {
+                DebugLog.d(TAG, "PIP enter skipped: player view already in PiP host under content");
+                cancelDeferredPipPlayerAdd();
+                removePipBlankPlaceholder();
                 exoPlayerView.setIsInPictureInPictureMode(true);
                 pipOwner = this;
+                ensurePipHostResizePopListener();
                 currentActivity.getWindow()
                         .addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 return;
             }
+
+            cancelDeferredPipPlayerAdd();
+            removePipBlankPlaceholder();
 
             exoPlayerView.setIsInPictureInPictureMode(true);
             currentActivity.getWindow()
@@ -2686,31 +2988,48 @@ public class ReactExoplayerView extends FrameLayout implements
 
             rootViewChildrenVisibility.clear();
 
-            for (int i = 0; i < rootView.getChildCount(); i++) {
+            final int childCountBeforePlaceholder = rootView.getChildCount();
+            for (int i = 0; i < childCountBeforePlaceholder; i++) {
                 View child = rootView.getChildAt(i);
-                if (child != exoPlayerView) {
-                    rootViewChildrenVisibility.put(child, child.getVisibility());
-                    child.setVisibility(View.GONE);
-                }
+                rootViewChildrenVisibility.put(child, child.getVisibility());
+                child.setVisibility(View.GONE);
             }
+
+            pipBlankPlaceholder = new View(currentActivity);
+            pipBlankPlaceholder.setBackgroundColor(Color.BLACK);
+            rootView.addView(pipBlankPlaceholder, layoutParams);
+
             player.setPlayWhenReady(true);
             player.play();
 
-            // Defensive: ensure detached before add (covers races where removeView did not run)
-            ViewGroup parentBeforeAdd = (ViewGroup) exoPlayerView.getParent();
-            if (parentBeforeAdd != null) {
-                parentBeforeAdd.removeView(exoPlayerView);
+            ViewGroup parentBeforeSchedule = (ViewGroup) exoPlayerView.getParent();
+            if (parentBeforeSchedule != null) {
+                parentBeforeSchedule.removeView(exoPlayerView);
             }
-            rootView.addView(exoPlayerView, layoutParams);
+
+            scheduleDeferredPipPlayerAttach(rootView, layoutParams, currentActivity);
         } else {
+
+            cancelDeferredPipPlayerAdd();
+            removePipBlankPlaceholder();
+            removePipHostResizePopListener();
 
             if (player != null) {
                 player.setPlayWhenReady(false);
                 player.pause();
             }
-            // Remove player view from rootView if it's there (from PIP mode)
+            // Remove player from PiP host or legacy direct content attachment
             ViewGroup currentParent = (ViewGroup) exoPlayerView.getParent();
-            if (currentParent != null && currentParent.equals(rootView)) {
+            if (pipPlayerHost != null && currentParent == pipPlayerHost) {
+                pipPlayerHost.animate().cancel();
+                pipPlayerHost.setScaleX(1f);
+                pipPlayerHost.setScaleY(1f);
+                pipPlayerHost.removeView(exoPlayerView);
+                if (pipPlayerHost.getParent() != null) {
+                    ((ViewGroup) pipPlayerHost.getParent()).removeView(pipPlayerHost);
+                }
+                pipPlayerHost = null;
+            } else if (currentParent != null && currentParent.equals(rootView)) {
                 rootView.removeView(exoPlayerView);
             }
 
@@ -2786,6 +3105,17 @@ public class ReactExoplayerView extends FrameLayout implements
         if (exoPlayerView.getVisibility() != View.VISIBLE) return false;
         if (exoPlayerView.getParent() == null || !(exoPlayerView.getParent() instanceof ViewGroup)) return false;
         return true;
+    }
+
+    /**
+     * When PiP is entered without {@link #pendingPipEnterView} (e.g. auto-enter), only the cell that is
+     * actually playing should attach — same rules as {@link #enterPictureInPictureModeInternal(boolean)} for non-JS.
+     */
+    private boolean isPlayingSurfaceForPictureInPictureEnter() {
+        if (player == null) return false;
+        // Match enterPictureInPictureModeInternal(false): only playWhenReady gates auto-enter surfaces.
+        if (!player.getPlayWhenReady()) return false;
+        return canEnterPictureInPicture();
     }
 
     /** Auto-enter on leave (and legacy no-arg path): only the actually playing list cell may own PiP. */
