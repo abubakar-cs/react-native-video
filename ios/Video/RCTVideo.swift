@@ -102,6 +102,8 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
 
     private var _pip: RCTPictureInPicture?
     private var _isPictureInPictureActive = false
+    /// Set when an item ends while PiP-on-leave is enabled; release builds may report PiP inactive before JS `setSource`.
+    private var _expectingPipSourceReplacement = false
 
     // Events
     @objc var onVideoLoadStart: RCTDirectEventBlock?
@@ -150,12 +152,13 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
 
     func handlePictureInPictureExit() {
         _isPictureInPictureActive = false
+        // Do not clear `_expectingPipSourceReplacement` here — cleared in `setupPlayer` or `exitPictureInPicture()`.
         onPictureInPictureStatusChanged?(["isActive": NSNumber(value: false)])
 
-        // To continue audio playback in backgroud we need to set
-        // player in _playerLayer & _playerViewController to nil
+        // Nil-ing the layer’s player drops video while `AVPlayer` keeps playing (background audio only). Skip for
+        // PiP-on-leave feeds that replace `AVPlayerItem` immediately after end.
         let appState = UIApplication.shared.applicationState
-        if _playInBackground && appState == .background {
+        if _playInBackground && appState == .background && !_enterPictureInPictureOnLeave {
             _playerLayer?.player = nil
             _playerViewController?.player = nil
             _player?.play()
@@ -168,10 +171,24 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
 
     func isPictureInPictureActive() -> Bool {
         #if os(iOS)
-            return _isPictureInPictureActive
+            return _isPictureInPictureActive || (_pip?.isPictureInPictureSessionActive() ?? false)
         #else
             return false
         #endif
+    }
+
+    /// Keep the same inline `AVPlayerLayer` through `setSrc` when PiP-on-leave is enabled.
+    private func shouldRetainInlinePlayerLayerDuringSourceChange() -> Bool {
+        #if os(iOS)
+            return _enterPictureInPictureOnLeave && !_controls && _playerLayer != nil
+        #else
+            return false
+        #endif
+    }
+
+    /// True when PiP is active, we expect JS `setSource` soon, or PiP-on-leave pipeline must keep the layer.
+    private func shouldPreserveVideoPresentationThroughSourceChange() -> Bool {
+        _expectingPipSourceReplacement || isPictureInPictureActive() || shouldRetainInlinePlayerLayerDuringSourceChange()
     }
 
     func initPictureinPicture() {
@@ -614,6 +631,12 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
         }
 
         _playerObserver.player = _player
+        #if os(iOS)
+            if !_controls, let layer = _playerLayer, let player = _player {
+                layer.player = player
+            }
+            initPictureinPicture()
+        #endif
         applyModifiers()
         _player?.actionAtItemEnd = .none
 
@@ -627,6 +650,9 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
                 _imaAdsManager.setUpAdsLoader()
             }
         #endif
+        #if os(iOS)
+            _expectingPipSourceReplacement = false
+        #endif
         isSetSourceOngoing = false
         applyNextSource()
     }
@@ -637,7 +663,7 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
             DebugLog("setSrc buffer request")
             // Clearing the current item stops Picture-in-Picture (PiP is tied to the player layer).
             // While PiP is active, only queue the next source so the in-flight load can finish or chain via applyNextSource.
-            if !isPictureInPictureActive() {
+            if !shouldPreserveVideoPresentationThroughSourceChange() {
                 self._player?.replaceCurrentItem(with: nil)
             }
             nextSource = source
@@ -667,11 +693,9 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
                 return
             }
 
-            // Ensure UI operations are performed on main thread.
-            // Do not remove the player layer while PiP is active: AVPictureInPictureController is bound to that layer,
-            // and removing it ends PiP. Same AVPlayer + replaceCurrentItem (in setupPlayer) keeps PiP alive for the next URL.
+            // Do not remove the player layer during PiP / PiP-on-leave source swaps (release timing vs JS `setSource`).
             DispatchQueue.main.sync {
-                if !self.isPictureInPictureActive() {
+                if !self.shouldPreserveVideoPresentationThroughSourceChange() {
                     self.removePlayerLayer()
                 }
             }
@@ -1798,6 +1822,14 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
                 }
             )
         } else {
+            #if os(iOS)
+                if _enterPictureInPictureOnLeave {
+                    _expectingPipSourceReplacement = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                        self?._expectingPipSourceReplacement = false
+                    }
+                }
+            #endif
             _player?.pause()
             _player?.rate = 0.0
         }
@@ -1889,6 +1921,9 @@ class RCTVideo: UIView, RCTVideoPlayerViewControllerDelegate, RCTPlayerObserverH
     @objc
     func exitPictureInPicture() {
         guard isPictureInPictureActive() else { return }
+        #if os(iOS)
+            _expectingPipSourceReplacement = false
+        #endif
         _pip?.exitPictureInPicture()
         if _enterPictureInPictureOnLeave {
             initPictureinPicture()

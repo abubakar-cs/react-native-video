@@ -89,6 +89,11 @@ import React
                 }
             }
         }
+
+        /// System PiP state (RCTVideo’s delegate flag can desync from this in release builds).
+        func isPictureInPictureSessionActive() -> Bool {
+            _pipController?.isPictureInPictureActive ?? false
+        }
     }
 #else
     class RCTPictureInPicture: NSObject {
@@ -99,5 +104,6 @@ import React
         func deinitPipController() {}
         func enterPictureInPicture() {}
         func exitPictureInPicture() {}
+        func isPictureInPictureSessionActive() -> Bool { false }
     }
 #endif
