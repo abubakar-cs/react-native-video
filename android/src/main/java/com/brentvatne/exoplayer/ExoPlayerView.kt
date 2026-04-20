@@ -33,18 +33,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
     @Volatile
     private var isInPipMode: Boolean = false
 
-    private val liveBadge: TextView = TextView(context).apply {
-        text = "LIVE"
-        setTextColor(Color.WHITE)
-        textSize = 12f
-        val drawable = GradientDrawable()
-        drawable.setColor(Color.RED)
-        drawable.cornerRadius = 6f
-        background = drawable
-        setPadding(12, 4, 12, 4)
-        visibility = View.GONE
-    }
-
     private val playerView = PlayerView(context).apply {
         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         setShutterBackgroundColor(Color.TRANSPARENT)
@@ -65,11 +53,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
         // Add PlayerView with explicit layout parameters
         val playerViewLayoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         addView(playerView, playerViewLayoutParams)
-
-        // Add live badge with its own layout parameters
-        val liveBadgeLayoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
-        liveBadgeLayoutParams.setMargins(16, 16, 16, 16)
-        addView(liveBadge, liveBadgeLayoutParams)
     }
 
     fun setPlayer(player: ExoPlayer?) {
@@ -302,9 +285,6 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
         val player = playerView.player ?: return
         val isLive = player.isCurrentMediaItemLive
         val seekable = player.isCurrentMediaItemSeekable
-
-        // Show/hide badge
-        liveBadge.visibility = if (isLive) View.VISIBLE else View.GONE
 
         // Disable/enable scrubbing based on seekable
         val timeBar = playerView.findViewById<DefaultTimeBar?>(androidx.media3.ui.R.id.exo_progress)
