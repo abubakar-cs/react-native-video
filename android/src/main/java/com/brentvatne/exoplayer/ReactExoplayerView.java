@@ -2697,6 +2697,27 @@ public class ReactExoplayerView extends FrameLayout implements
     }
 
     /**
+     * Removes {@link #exoPlayerView} from any parent that is not {@code host}.
+     * Deferred PiP attach can race with RN layout re-attaching the surface, or duplicate callbacks;
+     * {@link ViewGroup#addView} then throws "The specified child already has a parent".
+     */
+    private void detachExoPlayerUnlessUnderPipHost(@NonNull FrameLayout host) {
+        if (exoPlayerView == null) {
+            return;
+        }
+        while (true) {
+            ViewParent p = exoPlayerView.getParent();
+            if (p == null || p == host) {
+                return;
+            }
+            if (!(p instanceof ViewGroup)) {
+                return;
+            }
+            ((ViewGroup) p).removeView(exoPlayerView);
+        }
+    }
+
+    /**
      * Ensures {@link #exoPlayerView} is not nested under {@link #pipPlayerHost} then under {@code contentRoot}.
      * Configuration / duplicate PiP callbacks can re-run attach; without this, {@link ViewGroup#addView}
      * throws "child already has a parent".
@@ -2871,6 +2892,7 @@ public class ReactExoplayerView extends FrameLayout implements
                 pipPlayerHost.setScaleY(1f);
             }
             repairPipPlayerHostInContent(rootView, layoutParams);
+            detachExoPlayerUnlessUnderPipHost(pipPlayerHost);
             if (exoPlayerView.getParent() != pipPlayerHost) {
                 pipPlayerHost.addView(exoPlayerView, new FrameLayout.LayoutParams(
                         LayoutParams.MATCH_PARENT,
