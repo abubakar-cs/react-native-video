@@ -1587,52 +1587,54 @@ public class ReactExoplayerView extends FrameLayout implements
     }
 
     private void videoLoaded() {
-        if (!player.isPlayingAd() && loadVideoStarted) {
-            loadVideoStarted = false;
-            if (audioTrackType != null) {
-                setSelectedAudioTrack(audioTrackType, audioTrackValue);
+        if(player != null) {
+            if (!player.isPlayingAd() && loadVideoStarted) {
+                loadVideoStarted = false;
+                if (audioTrackType != null) {
+                    setSelectedAudioTrack(audioTrackType, audioTrackValue);
+                }
+                if (videoTrackType != null) {
+                    setSelectedVideoTrack(videoTrackType, videoTrackValue);
+                }
+                if (textTrackType != null) {
+                    setSelectedTextTrack(textTrackType, textTrackValue);
+                }
+                Format videoFormat = player.getVideoFormat();
+                boolean isRotatedContent = videoFormat != null && (videoFormat.rotationDegrees == 90 || videoFormat.rotationDegrees == 270);
+                int width = videoFormat != null ? (isRotatedContent ? videoFormat.height : videoFormat.width) : 0;
+                int height = videoFormat != null ? (isRotatedContent ? videoFormat.width : videoFormat.height) : 0;
+                String trackId = videoFormat != null ? videoFormat.id : null;
+
+                // Properties that must be accessed on the main thread
+                long duration = player.getDuration();
+                long currentPosition = player.getCurrentPosition();
+                ArrayList<Track> audioTracks = getAudioTrackInfo();
+                ArrayList<Track> textTracks  = getTextTrackInfo();
+
+                if (source.getContentStartTime() != -1) {
+                    ExecutorService es = Executors.newSingleThreadExecutor();
+                    es.execute(() -> {
+                        // To prevent ANRs caused by getVideoTrackInfo we run this on a different thread and notify the player only when we're done
+                        ArrayList<VideoTrack> videoTracks = getVideoTrackInfoFromManifest();
+                        if (videoTracks != null) {
+                            isUsingContentResolution = true;
+                        }
+                        eventEmitter.onVideoLoad.invoke(duration, currentPosition, width, height,
+                                audioTracks, textTracks, videoTracks, trackId );
+                        
+                        updateSubtitleButtonVisibility();
+                    });
+                    return;
+                }
+
+                ArrayList<VideoTrack> videoTracks = getVideoTrackInfo();
+
+                eventEmitter.onVideoLoad.invoke(duration, currentPosition, width, height,
+                        audioTracks, textTracks, videoTracks, trackId);
+
+                updateSubtitleButtonVisibility();
+                refreshControlsStyles();
             }
-            if (videoTrackType != null) {
-                setSelectedVideoTrack(videoTrackType, videoTrackValue);
-            }
-            if (textTrackType != null) {
-                setSelectedTextTrack(textTrackType, textTrackValue);
-            }
-            Format videoFormat = player.getVideoFormat();
-            boolean isRotatedContent = videoFormat != null && (videoFormat.rotationDegrees == 90 || videoFormat.rotationDegrees == 270);
-            int width = videoFormat != null ? (isRotatedContent ? videoFormat.height : videoFormat.width) : 0;
-            int height = videoFormat != null ? (isRotatedContent ? videoFormat.width : videoFormat.height) : 0;
-            String trackId = videoFormat != null ? videoFormat.id : null;
-
-            // Properties that must be accessed on the main thread
-            long duration = player.getDuration();
-            long currentPosition = player.getCurrentPosition();
-            ArrayList<Track> audioTracks = getAudioTrackInfo();
-            ArrayList<Track> textTracks  = getTextTrackInfo();
-
-            if (source.getContentStartTime() != -1) {
-                ExecutorService es = Executors.newSingleThreadExecutor();
-                es.execute(() -> {
-                    // To prevent ANRs caused by getVideoTrackInfo we run this on a different thread and notify the player only when we're done
-                    ArrayList<VideoTrack> videoTracks = getVideoTrackInfoFromManifest();
-                    if (videoTracks != null) {
-                        isUsingContentResolution = true;
-                    }
-                    eventEmitter.onVideoLoad.invoke(duration, currentPosition, width, height,
-                            audioTracks, textTracks, videoTracks, trackId );
-                    
-                    updateSubtitleButtonVisibility();
-                });
-                return;
-            }
-
-            ArrayList<VideoTrack> videoTracks = getVideoTrackInfo();
-
-            eventEmitter.onVideoLoad.invoke(duration, currentPosition, width, height,
-                    audioTracks, textTracks, videoTracks, trackId);
-
-            updateSubtitleButtonVisibility();
-            refreshControlsStyles();
         }
     }
 
