@@ -6,10 +6,8 @@ import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.View
 import android.view.View.MeasureSpec
-import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.TextureView
-import android.graphics.SurfaceTexture
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.media3.common.Player
@@ -21,6 +19,7 @@ import androidx.media3.ui.DefaultTimeBar
 import androidx.media3.ui.PlayerView
 import com.brentvatne.common.api.ResizeMode
 import com.brentvatne.common.api.SubtitleStyle
+import com.brentvatne.common.api.ViewType as RNVViewType
 
 
 @UnstableApi
@@ -29,6 +28,7 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
 
     private var localStyle = SubtitleStyle()
     private var pendingResizeMode: Int? = null
+    private var appliedSurfaceViewType: Int? = null
 
     @Volatile
     private var isInPipMode: Boolean = false
@@ -135,83 +135,53 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
         playerView.setShutterBackgroundColor(color)
     }
 
-    private fun attachSurfaceCallbacks(surfaceView: SurfaceView) {
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                // no-op
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // 🔥 ONLY when THIS view is in PIP
-                if (!isInPipMode) return
-
-                val player = playerView.player ?: return
-
-                player.playWhenReady = false
-            }
-
-            override fun surfaceChanged(
-                holder: SurfaceHolder,
-                format: Int,
-                width: Int,
-                height: Int
-            ) {
-                // no-op
-            }
-        })
-    }
-
-    private fun attachTextureListener(textureView: TextureView) {
-        textureView.surfaceTextureListener =
-            object : TextureView.SurfaceTextureListener {
-
-                override fun onSurfaceTextureAvailable(
-                    surface: SurfaceTexture,
-                    width: Int,
-                    height: Int
-                ) {
-                    // no-op
-                }
-
-                override fun onSurfaceTextureSizeChanged(
-                    surface: SurfaceTexture,
-                    width: Int,
-                    height: Int
-                ) {
-                    // no-op
-                }
-
-                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                    // 🔥 ONLY pause when we're actually exiting PIP
-                    if (!isInPipMode) {
-                        return false
-                    }
-
-                    playerView.player?.let { player ->
-                        player.playWhenReady = false
-                    }
-
-                    // true = we release the SurfaceTexture (safe for PIP exit)
-                    return true
-                }
-
-                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                    // no-op
-                }
-            }
-    }
-
     fun updateSurfaceView(viewType: Int) {
-        when (val videoSurfaceView = playerView.videoSurfaceView) {
-            is SurfaceView -> {
-                attachSurfaceCallbacks(videoSurfaceView)
-            }
+        if (appliedSurfaceViewType == viewType) {
+            return
+        }
 
-            is TextureView -> {
-                attachTextureListener(videoSurfaceView)
+        val currentSurfaceView = playerView.videoSurfaceView ?: return
+        val shouldUseTextureView = viewType == RNVViewType.VIEW_TYPE_TEXTURE
+        val isCurrentTextureView = currentSurfaceView is TextureView
+
+        if (shouldUseTextureView == isCurrentTextureView) {
+            if (!shouldUseTextureView && currentSurfaceView is SurfaceView) {
+                currentSurfaceView.setSecure(viewType == RNVViewType.VIEW_TYPE_SURFACE_SECURE)
+            }
+            appliedSurfaceViewType = viewType
+            return
+        }
+
+        val contentFrame =
+            playerView.findViewById<AspectRatioFrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
+                ?: return
+        val replacementSurfaceView: View = if (shouldUseTextureView) {
+            TextureView(context).apply {
+                isOpaque = false
+            }
+        } else {
+            SurfaceView(context).apply {
+                if (viewType == RNVViewType.VIEW_TYPE_SURFACE_SECURE) {
+                    setSecure(true)
+                }
             }
         }
+        val insertIndex = contentFrame.indexOfChild(currentSurfaceView).coerceAtLeast(0)
+        val player = playerView.player
+
+        clearVideoSurface(player, currentSurfaceView)
+        contentFrame.removeView(currentSurfaceView)
+        replacementSurfaceView.layoutParams = FrameLayout.LayoutParams(
+            LayoutParams.MATCH_PARENT,
+            LayoutParams.MATCH_PARENT,
+        )
+        contentFrame.addView(replacementSurfaceView, insertIndex)
+        setInternalSurfaceViewField(replacementSurfaceView)
+        attachVideoSurface(player, replacementSurfaceView)
+
+        appliedSurfaceViewType = viewType
+        playerView.requestLayout()
+        requestLayout()
     }
 
 
@@ -323,6 +293,28 @@ class ExoPlayerView @JvmOverloads constructor(context: Context, attrs: Attribute
 
     companion object {
         private const val TAG = "ExoPlayerView"
+    }
+
+    private fun clearVideoSurface(player: Player?, surfaceView: View) {
+        when (surfaceView) {
+            is TextureView -> player?.clearVideoTextureView(surfaceView)
+            is SurfaceView -> player?.clearVideoSurfaceView(surfaceView)
+        }
+    }
+
+    private fun attachVideoSurface(player: Player?, surfaceView: View) {
+        when (surfaceView) {
+            is TextureView -> player?.setVideoTextureView(surfaceView)
+            is SurfaceView -> player?.setVideoSurfaceView(surfaceView)
+        }
+    }
+
+    private fun setInternalSurfaceViewField(surfaceView: View) {
+        runCatching {
+            val surfaceField = PlayerView::class.java.getDeclaredField("surfaceView")
+            surfaceField.isAccessible = true
+            surfaceField.set(playerView, surfaceView)
+        }
     }
 
     /**
